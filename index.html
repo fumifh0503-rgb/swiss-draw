@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Swiss Draw Manager</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: sans-serif; padding: 16px; }
+h2 { margin-top: 32px; }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+th, td { border: 1px solid #ccc; padding: 8px; text-align: center; }
+input, button, select { padding: 8px; margin: 4px 0; width: 100%; }
+.match { margin-bottom: 16px; padding: 12px; border: 1px solid #aaa; border-radius: 6px; }
+.bye { background: #f0f8ff; padding: 12px; border-radius: 6px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+
+<h1>Swiss Draw Manager</h1>
+
+<!-- 参加者登録 -->
+<h2>参加者登録</h2>
+<input id="playerName" placeholder="名前を入力">
+<button onclick="addPlayer()">追加</button>
+
+<table id="playerTable">
+<thead>
+<tr>
+  <th>#</th>
+  <th>名前</th>
+  <th>勝点</th>
+  <th>操作</th>
+</tr>
+</thead>
+<tbody></tbody>
+</table>
+
+<!-- ラウンド管理 -->
+<h2>ラウンド</h2>
+<button onclick="startRound()">次のラウンド開始</button>
+<button onclick="clearLastRound()">直近ラウンドをクリア</button>
+<button onclick="softReset()">大会リセット（参加者保持）</button>
+<button onclick="resetAll()">大会をリセット</button>
+<div id="roundInfo"></div>
+
+<!-- 組み合わせ -->
+<h2>組み合わせ</h2>
+<div id="pairings"></div>
+
+<!-- 順位表 -->
+<h2>順位</h2>
+<table id="rankingTable">
+<thead>
+<tr>
+  <th>順位</th>
+  <th>名前</th>
+  <th>勝点</th>
+  <th>OMW%</th>
+  <th>GW%</th>
+  <th>OppGW%</th>
+</tr>
+</thead>
+<tbody></tbody>
+</table>
+
+<script>
+let players = JSON.parse(localStorage.getItem("players") || "[]");
+let round = Number(localStorage.getItem("round") || 0);
+let history = JSON.parse(localStorage.getItem("history") || "[]");
+
+function save() {
+    localStorage.setItem("players", JSON.stringify(players));
+    localStorage.setItem("round", round);
+    localStorage.setItem("history", JSON.stringify(history));
+}
+
+function renderPlayers() {
+    const tbody = document.querySelector("#playerTable tbody");
+    tbody.innerHTML = "";
+    players.forEach((p, i) => {
+        tbody.innerHTML += `
+        <tr>
+          <td>${i+1}</td>
+          <td>${p.name}</td>
+          <td>${p.points}</td>
+          <td>
+            <button onclick="editPlayer(${i})">編集</button>
+            <button onclick="deletePlayer(${i})">削除</button>
+          </td>
+        </tr>`;
+    });
+}
+
+function renderRanking() {
+    calculateStats();
+
+    const tbody = document.querySelector("#rankingTable tbody");
+    tbody.innerHTML = "";
+
+    const sorted = [...players].sort((a,b)=>{
+        if (b.points !== a.points) return b.points - a.points;
+        if (b.omw !== a.omw) return b.omw - a.omw;
+        if (b.gw !== a.gw) return b.gw - a.gw;
+        return b.oppgw - a.oppgw;
+    });
+
+    sorted.forEach((p, i) => {
+        tbody.innerHTML += `
+        <tr>
+            <td>${i+1}</td>
+            <td>${p.name}</td>
+            <td>${p.points}</td>
+            <td>${(p.omw*100).toFixed(1)}%</td>
+            <td>${(p.gw*100).toFixed(1)}%</td>
+            <td>${(p.oppgw*100).toFixed(1)}%</td>
+        </tr>`;
+    });
+}
+
+function addPlayer() {
+    const name = document.getElementById("playerName").value.trim();
+    if (!name) return;
+
+    players.push({
+        name,
+        points: 0,
+        played: [],
+        wins: 0,
+        losses: 0
+    });
+
+    document.getElementById("playerName").value = "";
+    save();
+    renderPlayers();
+    renderRanking();
+}
+
+function editPlayer(index) {
+    const newName = prompt("新しい名前を入力してください", players[index].name);
+    if (!newName) return;
+
+    const oldName = players[index].name;
+    players[index].name = newName;
+
+    players.forEach(p => {
+        p.played = p.played.map(x => x === oldName ? newName : x);
+    });
+
+    history.forEach(r => {
+        r.pairings.forEach(pair => {
+            if (pair[0].name === oldName) pair[0].name = newName;
+            if (pair[1].name === oldName) pair[1].name = newName;
+        });
+    });
+
+    save();
+    renderPlayers();
+    renderRanking();
+    renderPairings();
+}
+
+function deletePlayer(index) {
+    if (!confirm("この参加者を削除しますか？")) return;
+
+    const name = players[index].name;
+
+    players.splice(index, 1);
+
+    players.forEach(p => {
+        p.played = p.played.filter(x => x !== name);
+    });
+
+    history.forEach(r => {
+        r.pairings = r.pairings.filter(pair =>
+            pair[0].name !== name && pair[1].name !== name
+        );
+    });
+
+    save();
+    renderPlayers();
+    renderRanking();
+    renderPairings();
+}
+
+function startRound() {
+    if (players.length < 2) return alert("参加者が足りません");
+    round++;
+    document.getElementById("roundInfo").innerText = `${round} ラウンド目`;
+
+    const sorted = [...players].sort((a,b)=>b.points - a.points);
+    const pairings = [];
+    const used = new Set();
+
+    if (sorted.length % 2 === 1) {
+        const candidates = sorted.filter(p => !p.played.includes("BYE"));
+        const byePlayer = candidates[candidates.length - 1];
+
+        byePlayer.points += 3;
+        byePlayer.played.push("BYE");
+        used.add(byePlayer.name);
+
+        pairings.push([byePlayer, { name: "BYE" }]);
+    }
+
+    for (let i = 0; i < sorted.length; i++) {
+        if (used.has(sorted[i].name)) continue;
+
+        let opponent = null;
+        for (let j = i+1; j < sorted.length; j++) {
+            if (used.has(sorted[j].name)) continue;
+            if (!sorted[i].played.includes(sorted[j].name)) {
+                opponent = sorted[j];
+                break;
+            }
+        }
+
+        if (!opponent) {
+            opponent = sorted.find(p => !used.has(p.name) && p.name !== sorted[i].name);
+        }
+
+        if (!opponent) continue;
+
+        used.add(sorted[i].name);
+        used.add(opponent.name);
+
+        pairings.push([sorted[i], opponent]);
+    }
+
+    history.push({ round, pairings });
+    save();
+    renderPairings();
+}
+
+function renderPairings() {
+    const container = document.getElementById("pairings");
+    container.innerHTML = "";
+
+    if (history.length === 0) return;
+
+    const last = history[history.length - 1];
+    last.pairings.forEach((pair, idx) => {
+
+        if (pair[1].name === "BYE") {
+            container.innerHTML += `
+                <div class="bye">
+                    <strong>${pair[0].name} は bye（不戦勝）</strong><br>
+                    勝点 +3 が付与されました
+                </div>
+            `;
+            return;
+        }
+
+        container.innerHTML += `
+            <div class="match">
+                <strong>${pair[0].name} vs ${pair[1].name}</strong><br>
+                <select id="result_${idx}">
+                    <option value="">結果を選択</option>
+                    <option value="0">${pair[0].name} 勝利</option>
+                    <option value="1">${pair[1].name} 勝利</option>
+                </select>
+                <button onclick="submitResult(${idx})">確定</button>
+            </div>
+        `;
+    });
+}
+
+function submitResult(idx) {
+    const last = history[history.length - 1];
+    const pair = last.pairings[idx];
+
+    if (pair[1].name === "BYE") return;
+
+    const result = document.getElementById(`result_${idx}`).value;
+    if (result === "") return alert("結果を選択してください");
+
+    const winner = pair[result];
+    const loser = pair[1 - result];
+
+    winner.points += 3;
+    winner.wins++;
+    loser.losses++;
+
+    winner.played.push(loser.name);
+    loser.played.push(winner.name);
+
+    save();
+    renderPlayers();
+    renderRanking();
+    alert("結果を反映しました");
+}
+
+function clearLastRound() {
+    if (history.length === 0) return alert("クリアできるラウンドがありません");
+
+    const last = history.pop();
+
+    last.pairings.forEach(pair => {
+        const p1 = players.find(p => p.name === pair[0].name);
+        const p2 = pair[1].name === "BYE" ? null : players.find(p => p.name === pair[1].name);
+
+        if (pair[1].name === "BYE") {
+            p1.points -= 3;
+            p1.played = p1.played.filter(x => x !== "BYE");
+            return;
+        }
+
+        const winner = (p1.wins > p2.wins) ? p1 : p2;
+        const loser = (winner === p1) ? p2 : p1;
+
+        winner.points -= 3;
+        winner.wins--;
+        loser.losses--;
+
+        winner.played = winner.played.filter(x => x !== loser.name);
+        loser.played = loser.played.filter(x => x !== winner.name);
+    });
+
+    round--;
+    save();
+    renderPlayers();
+    renderRanking();
+    renderPairings();
+    document.getElementById("roundInfo").innerText = round ? `${round} ラウンド目` : "";
+
+    alert("直近ラウンドをクリアしました");
+}
+function softReset() {
+    if (!confirm("参加者を残したまま、大会結果をリセットします。よろしいですか？")) return;
+
+    // 参加者の勝点・勝敗・履歴を初期化
+    players.forEach(p => {
+        p.points = 0;
+        p.wins = 0;
+        p.losses = 0;
+        p.played = [];
+    });
+
+    // ラウンドと履歴を初期化
+    round = 0;
+    history = [];
+
+    save();
+    renderPlayers();
+    renderRanking();
+    renderPairings();
+    document.getElementById("roundInfo").innerText = "";
+
+    alert("大会結果をリセットしました（参加者は保持）");
+}
+function resetAll() {
+    if (!confirm("参加者を含め、大会データをすべてリセットします。よろしいですか？")) return;
+
+    players = [];
+    round = 0;
+    history = [];
+
+    save();
+    renderPlayers();
+    renderRanking();
+    renderPairings();
+    document.getElementById("roundInfo").innerText = "";
+
+    alert("大会データをすべてリセットしました");
+}
+
+function calculateStats() {
+    players.forEach(p => {
+        const total = p.wins + p.losses;
+        p.gw = total > 0 ? p.wins / total : 0;
+
+        const opps = p.played.filter(x => x !== "BYE");
+        if (opps.length === 0) {
+            p.omw = 0;
+        } else {
+            let sum = 0;
+            opps.forEach(name => {
+                const opp = players.find(o => o.name === name);
+                const oppTotal = opp.wins + opp.losses;
+                let oppRate = oppTotal > 0 ? opp.wins / oppTotal : 0;
+                if (oppRate < 0.33) oppRate = 0.33;
+                sum += oppRate;
+            });
+            p.omw = sum / opps.length;
+        }
+
+        if (opps.length === 0) {
+            p.oppgw = 0;
+        } else {
+            let sum = 0;
+            opps.forEach(name => {
+                const opp = players.find(o => o.name === name);
+                sum += opp.gw;
+            });
+            p.oppgw = sum / opps.length;
+        }
+    });
+}
+
+renderPlayers();
+renderRanking();
+renderPairings();
+document.getElementById("roundInfo").innerText = round ? `${round} ラウンド目` : "";
+</script>
+
+</body>
+</html>
