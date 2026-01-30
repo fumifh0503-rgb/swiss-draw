@@ -37,10 +37,15 @@ input, button, select { padding: 8px; margin: 4px 0; width: 100%; }
 
 <!-- ラウンド管理 -->
 <h2>ラウンド</h2>
-<button onclick="startRound()">次のラウンド開始</button>
+
+<div id="roundButtons">
+    <!-- ここに JS でボタンを表示する -->
+</div>
+
 <button onclick="clearLastRound()">直近ラウンドをクリア</button>
 <button onclick="softReset()">大会リセット（参加者保持）</button>
 <button onclick="resetAll()">大会をリセット</button>
+
 <div id="roundInfo"></div>
 
 <!-- 組み合わせ -->
@@ -74,6 +79,7 @@ function save() {
     localStorage.setItem("history", JSON.stringify(history));
 }
 
+
 function renderPlayers() {
     const tbody = document.querySelector("#playerTable tbody");
     tbody.innerHTML = "";
@@ -98,13 +104,16 @@ function renderRanking() {
     tbody.innerHTML = "";
 
 	const sorted = [...players].sort((a, b) => {
-    	// ① OppMW%（対戦相手のマッチ得点率の平均）
-    	if (b.omw !== a.omw) return b.omw - a.omw;
+    	// ① 勝ち点
+    	if (b.points !== a.points) return b.points - a.points;
 
-	    // ② 対戦相手の得点（平均）
+	    // ② OMW%（対戦相手のマッチ得点率の平均）
+    	if (b.omw !== a.omw) return b.omw - a.omw;
+	
+    	// ③ 対戦相手の得点（平均）
     	if (b.oppPoints !== a.oppPoints) return b.oppPoints - a.oppPoints;
 
-    	// ③ 対戦相手の OppMW% の平均
+	    // ④ 対戦相手の OMW% の平均
     	return b.opp_omw - a.opp_omw;
 	});
 
@@ -187,6 +196,14 @@ function deletePlayer(index) {
 }
 
 function startRound() {
+		// --- 全勝者チェック ---
+		const undefeated = getUndefeatedPlayers();
+
+		// 1ラウンド目はスキップ（全員 losses=0 なので）
+		if (round >= 1 && undefeated.length === 1) {
+    	alert(`大会終了！優勝者は ${undefeated[0].name} です`);
+    	return;
+	}
     if (players.length < 2) return alert("参加者が足りません");
     round++;
     document.getElementById("roundInfo").innerText = `${round} ラウンド目`;
@@ -195,17 +212,33 @@ function startRound() {
     const pairings = [];
     const used = new Set();
 
-    if (sorted.length % 2 === 1) {
-        const candidates = sorted.filter(p => !p.played.includes("BYE"));
-        const byePlayer = candidates[candidates.length - 1];
+// --- Bye の決定 ---
+if (sorted.length % 2 === 1) {
 
-        byePlayer.points += 3;
-        byePlayer.played.push("BYE");
-        used.add(byePlayer.name);
+    let byeCandidates;
 
-        pairings.push([byePlayer, { name: "BYE" }]);
+    if (round === 1) {
+        // 1ラウンド目：全員からランダム
+        byeCandidates = [...sorted];
+    } else {
+        // 2ラウンド目以降：勝点が最も低い人たちからランダム
+        const minPoints = Math.min(...sorted.map(p => p.points));
+        byeCandidates = sorted.filter(p => p.points === minPoints);
     }
 
+    // すでに BYE を受けた人は除外
+    byeCandidates = byeCandidates.filter(p => !p.played.includes("BYE"));
+
+    // ランダム選出
+    const byePlayer = byeCandidates[Math.floor(Math.random() * byeCandidates.length)];
+
+    // Bye 処理
+    byePlayer.points += 3;
+    byePlayer.played.push("BYE");
+    used.add(byePlayer.name);
+
+    pairings.push([byePlayer, { name: "BYE" }]);
+}
     for (let i = 0; i < sorted.length; i++) {
         if (used.has(sorted[i].name)) continue;
 
@@ -231,8 +264,9 @@ function startRound() {
     }
 
     history.push({ round, pairings });
-    save();
-    renderPairings();
+	save();
+	renderPairings();
+	renderRoundButtons();   // ← これを追加！
 }
 
 function renderPairings() {
@@ -267,8 +301,33 @@ function renderPairings() {
             </div>
         `;
     });
+    container.innerHTML += `
+    <button onclick="submitAllResults()" style="margin-top:16px; padding:12px;">
+        このラウンドの結果を一括登録
+    </button>
+`;
 }
+function applyMatchResult(p1, p2, result) {
+    // 両者負け
+    if (result === "both_lose") {
+        p1.losses++;
+        p2.losses++;
+        p1.played.push(p2.name);
+        p2.played.push(p1.name);
+        return;
+    }
 
+    // 通常の勝敗
+    const winner = result === "0" ? p1 : p2;
+    const loser  = result === "0" ? p2 : p1;
+
+    winner.points += 3;
+    winner.wins++;
+    loser.losses++;
+
+    winner.played.push(loser.name);
+    loser.played.push(winner.name);
+}
 function submitResult(idx) {
     const last = history[history.length - 1];
     const pair = last.pairings[idx];
@@ -281,36 +340,44 @@ function submitResult(idx) {
     const p1 = players.find(p => p.name === pair[0].name);
     const p2 = players.find(p => p.name === pair[1].name);
 
-    // --- 両者負け処理 ---
-    if (result === "both_lose") {
-        p1.losses++;
-        p2.losses++;
-
-        p1.played.push(p2.name);
-        p2.played.push(p1.name);
-
-        save();
-        renderPlayers();
-        renderRanking();
-        alert("両者負けを反映しました");
-        return;
-    }
-
-    // --- 通常の勝敗処理 ---
-    const winner = result === "0" ? p1 : p2;
-    const loser = result === "0" ? p2 : p1;
-
-    winner.points += 3;
-    winner.wins++;
-    loser.losses++;
-
-    winner.played.push(loser.name);
-    loser.played.push(winner.name);
+    applyMatchResult(p1, p2, result);
 
     save();
     renderPlayers();
     renderRanking();
     alert("結果を反映しました");
+}
+function submitAllResults() {
+    const last = history[history.length - 1];
+
+    // 未選択があるかチェック
+    for (let i = 0; i < last.pairings.length; i++) {
+        const pair = last.pairings[i];
+        if (pair[1].name === "BYE") continue;
+
+        const result = document.getElementById(`result_${i}`).value;
+        if (result === "") {
+            alert("未入力の試合があります");
+            return;
+        }
+    }
+
+    // 全試合を処理
+    for (let i = 0; i < last.pairings.length; i++) {
+        const pair = last.pairings[i];
+        if (pair[1].name === "BYE") continue;
+
+        const result = document.getElementById(`result_${i}`).value;
+        const p1 = players.find(p => p.name === pair[0].name);
+        const p2 = players.find(p => p.name === pair[1].name);
+
+        applyMatchResult(p1, p2, result);
+    }
+
+    save();
+    renderPlayers();
+    renderRanking();
+    alert("このラウンドの結果を一括登録しました");
 }
 function clearLastRound() {
     if (history.length === 0) return alert("クリアできるラウンドがありません");
@@ -444,11 +511,32 @@ function calculateStats() {
             p.opp_omw = sumOppOMW / opps.length;
         }
     });
-}}
+}
+function renderRoundButtons() {
+    const div = document.getElementById("roundButtons");
+
+    if (round === 0) {
+        div.innerHTML = `
+            <button onclick="startRound()" style="background:#4CAF50; color:white;">
+                大会開始（1ラウンド目）
+            </button>
+        `;
+    } else {
+        div.innerHTML = `
+            <button onclick="startRound()">
+                次のラウンド開始
+            </button>
+        `;
+    }
+}
+function getUndefeatedPlayers() {
+    return players.filter(p => p.losses === 0);
+}
 
 renderPlayers();
 renderRanking();
 renderPairings();
+renderRoundButtons();
 document.getElementById("roundInfo").innerText = round ? `${round} ラウンド目` : "";
 </script>
 
